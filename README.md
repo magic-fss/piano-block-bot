@@ -74,7 +74,7 @@ pip install -r requirements.txt
 ### 2. 运行脚本
 
 ```bash
-python "piano_block_tui.py"
+python piano_block_tui.py
 ```
 
 > ⚠️ **必须以管理员身份运行**，否则全局热键（F10/F12/ESC）无法注册。
