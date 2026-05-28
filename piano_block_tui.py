@@ -18,18 +18,17 @@ EMERGENCY_STOP_HOTKEY = 'esc'
 
 # 颜色检测（极简到极致）
 GRAY_TOLERANCE = 6
-MIN_BLACK_PIXELS = 50
+MIN_BLACK_PIXELS = 15   # 【优化】阈值降低，黑块刚露头即触发
 
 # 区域配置（宽高固定，提前缓存）
-AREA_WIDTH = 180
-AREA_HEIGHT = 100
-AREA_GAP = 20       # 区域之间的水平间隔（像素）
+AREA_WIDTH = 150
+AREA_HEIGHT = 200
+AREA_GAP = 50       # 区域之间的水平间隔（像素）
 AREA_COLORS = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]
 AREA_ALPHA = 0.3
 
 # 全局开关（零延迟）
 is_running = False
-LOOP_DELAY = 0        # 让出GIL，不增加实质延迟，降低CPU占用
 
 # 提前初始化（避免循环内创建）
 sct = mss.mss()
@@ -41,24 +40,6 @@ AREA_CACHE = []
 click_counts = [0, 0, 0, 0]       # 各区域累计点击次数
 session_counts = [0, 0, 0, 0]     # 本次运行累计点击次数
 last_click_time = 0               # 最后一次点击时间戳
-
-# 日志打印控制（避免刷屏）
-LOG_INTERVAL = 0.2  # 秒，日志刷新间隔
-last_log_time = 0
-
-def print_live_log():
-    """打印实时点击日志，数字实时变化"""
-    global last_log_time
-    now = time.time()
-    if now - last_log_time < LOG_INTERVAL:
-        return
-    last_log_time = now
-
-    line = " | ".join(
-        f"区域{i+1}: {click_counts[i]:>4}"
-        for i in range(4)
-    )
-    print(f"\r🎹 {line}", end="", flush=True)
 
 def print_summary(title="📊 点击统计"):
     """打印各区域点击统计汇总"""
@@ -148,18 +129,20 @@ def create_all_draggable_areas():
     print("🚀 超极速版启动！")
     print(f"操作：F10启动/暂停 | F12停止 | ESC紧急退出")
     print("⚠️  请手动关闭鼠标加速（控制面板→鼠标→指针选项→取消提高指针精确度）")
-    print("\n📋 各区域点击次数将实时显示...\n")
+    print("\n📋 运行时无实时日志，停止/暂停时输出统计...\n")
     tk_root.mainloop()
 
 
-# -------------------【超极速合并检测（砍掉OpenCV遍历）】-------------------
+# -------------------【超极速合并检测】-------------------
 def detect_and_click_all():
     """
-    超极速策略：
+    极限策略（基于吸附机制）：
     1. 合并截图（1次mss.grab代替4次）
     2. 跳过cv2.cvtColor，直接取B通道作为近似灰度
     3. 跳过cv2.threshold，用numpy布尔掩码直接统计黑像素
-    4. 局部变量缓存，避免全局查找
+    4. 【核心】只检测顶部1/4区域（50px），黑块刚碰顶即触发
+    5. 【核心】点击位置放在下半部偏下（3/4处），利用游戏纵向容错/吸附机制
+    6. 【核心】去掉break，一帧可处理多列
     """
     # 局部缓存（避免每次循环查找全局属性）
     _w = AREA_WIDTH
@@ -185,8 +168,7 @@ def detect_and_click_all():
     monitor = {"left": min_x, "top": min_y, "width": max_x - min_x, "height": max_y - min_y}
     big_img = np.array(sct.grab(monitor))
 
-    # 【优化1】跳过cv2.cvtColor，直接取B通道作为近似灰度
-    # 钢琴块2黑块=(0,0,0)，背景=白色/浅色，B通道足够判断
+    # 跳过cv2.cvtColor，直接取B通道作为近似灰度
     big_gray = big_img[:, :, 0]
 
     # 逐个区域切片检测
@@ -195,18 +177,22 @@ def detect_and_click_all():
         oy = y - min_y
         slice_gray = big_gray[oy:oy+_h, ox:ox+_w]
 
-        # 【优化2】跳过cv2.threshold，纯numpy布尔统计黑像素
-        # np.count_nonzero 比 np.sum 稍快，且省去创建二值图
-        if np.count_nonzero(slice_gray < _tol) >= _min_px:
-            center_x = x + _w // 2
-            center_y = y + _h // 2
-            mouse_click(center_x, center_y)
+        # 【关键优化】只检测顶部1/4（50px），黑块刚进入区域就触发
+        # 面积从30,000降到7,500，numpy计数速度提升4倍
+        top_slice = slice_gray[:_h//4, :]
+        
+        if np.count_nonzero(top_slice < _tol) >= _min_px:
+            # 【关键优化】点击位置放在区域下半部偏下（3/4处，150px）
+            # 依赖游戏机制：点击该列黑块下方的白色区域也能消除黑块
+            click_x = x + _w // 2
+            click_y = y + _h * 3 // 4
+            
+            mouse_click(click_x, click_y)
 
             click_counts[idx] += 1
             session_counts[idx] += 1
             last_click_time = time.time()
-            print_live_log()
-            break  # 只处理第一个检测到的黑块
+            # 【关键优化】删除break，一帧内可连续处理多列
 
 
 # -------------------【主逻辑（零冗余）】-------------------
@@ -218,7 +204,7 @@ def main_script():
         is_running = not is_running
         if is_running:
             reset_session_counts()
-            print("\n▶️ 启动 — 开始实时记录点击日志")
+            print("\n▶️ 启动 — 开始运行")
         else:
             print("\n⏸️ 暂停 — 本次运行统计如下：")
             print_summary("⏸️ 暂停统计")
@@ -246,7 +232,8 @@ def main_script():
         while True:
             if is_running:
                 detect_and_click_all()
-            time.sleep(LOOP_DELAY)
+            else:
+                time.sleep(0.05)   # 仅在暂停时让出CPU，运行时全力循环
     finally:
         sct.close()
         keyboard.unhook_all()
